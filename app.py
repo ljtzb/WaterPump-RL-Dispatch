@@ -262,10 +262,15 @@ with tab2:
             else:
                 df_long = pd.read_excel(uploaded_long_file, header=None)
 
-            num_data = df_long.select_dtypes(include=[np.number]).dropna(how='all')
-            if num_data.shape[0] >= 24:
-                # 提取底部的 24 行，剥离表头
-                matrix_24xN = num_data.iloc[-24:, :].values
+            # 🌟 核心升级：智能剥离非数字表头和时间列 (复刻 MATLAB 的 Range B2)
+            # 1. 强制将所有数据转为数字，遇到 "1:00" 或 "01-01" 这种文本，直接变成空值(NaN)
+            df_numeric = df_long.apply(pd.to_numeric, errors='coerce')
+            # 2. 删掉全是空值的行（剔除表头）和全是空值的列（剔除时刻列）
+            df_numeric = df_numeric.dropna(axis=0, how='all').dropna(axis=1, how='all')
+
+            if df_numeric.shape[0] >= 24:
+                # 提取底部的 24 行纯数字
+                matrix_24xN = df_numeric.iloc[-24:, :].values
                 # 核心机制：按列(天)拉平拼接为一维长序列
                 demand_sequence = matrix_24xN.flatten('F')
                 total_hours = len(demand_sequence)
