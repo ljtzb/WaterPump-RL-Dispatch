@@ -6,7 +6,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
-# --- 1. 加载 ONNX 模型 ---
+# ==========================================
+# --- 1. 加载 ONNX 模型 (AI 大脑) ---
+# 作用：把我们在云端训练好的深度强化学习模型加载进网页内存。
+# @st.cache_resource 确保模型只加载一次，防止每次点按钮都重新加载导致卡顿。
+# ==========================================
 @st.cache_resource
 def load_model():
     return ort.InferenceSession("pump_d3qn_model.onnx")
@@ -21,7 +25,11 @@ except Exception as e:
     model_loaded = False
 
 
-# --- 2. 专家导航仪 ---
+# ==========================================
+# --- 2. 专家导航仪 (安全护栏) ---
+# 作用：复刻 MATLAB 中的传统水务专家经验逻辑。
+# 根据当前时间、水位和电价，给出一个“推荐流量”，防止 AI 做出过于离谱的动作导致水池抽干或溢流。
+# ==========================================
 def get_expert_suggestion(target_hour, current_water_level, price, demand):
     base_price = 0.65
     valley_ratio = 0.48
@@ -43,7 +51,12 @@ def get_expert_suggestion(target_hour, current_water_level, price, demand):
     return ideal_flow, ideal_flow / 10000.0
 
 
-# --- 3. 多项式物理引擎 ---
+# ==========================================
+# --- 3. 多项式物理引擎 (真实环境仿真) ---
+# 作用：1:1 像素级复刻 MATLAB 中的物理计算环境。
+# 包含极其精确的三台水泵 Q-H(流量-扬程) 和 Q-P(流量-功率) 多项式系数。
+# 用于计算在 AI 指定的某套开关动作下，真实能抽多少水、耗多少度电。
+# ==========================================
 def calculate_physics(action_real, current_ideal_flow):
     status = [0, 0, 0]
     if action_real == 1:
@@ -92,11 +105,12 @@ def calculate_physics(action_real, current_ideal_flow):
     return real_total_flow, real_total_power, status
 
 
-# --- 电价模板配置 ---
+# ==========================================
+# --- 4. 基础数据配置 (电价与网页框架) ---
+# ==========================================
 normal_prices = [0.312] * 6 + [0.65] * 6 + [0.312] * 2 + [0.65] * 2 + [0.9685] * 2 + [1.17] * 2 + [0.9685] * 4
 summer_prices = [0.312] * 6 + [0.65] * 6 + [0.312] * 2 + [0.65] * 2 + [0.9685] * 4 + [1.17] * 2 + [0.9685] * 2
 
-# --- 4. 网页前端总布局 ---
 st.set_page_config(page_title="泵房智能调度系统", layout="wide")
 st.title("💧 给水厂取水泵房智能调度系统")
 st.markdown("基于 Dueling DQN 深度强化学习的自动化泵组启停规划平台")
@@ -107,11 +121,10 @@ with st.sidebar:
     init_action = st.selectbox("起始泵组状态", options=[1, 2, 4],
                                format_func=lambda x: {1: "单开1号泵", 2: "单开2号泵", 4: "单开3号泵"}[x])
 
-# 🌟 核心分流设计：选项卡 (Tabs)
 tab1, tab2 = st.tabs(["⏱️ 单日精细调度监控", "📅 长周期宏观评估 (多日/全年)"])
 
 # ==========================================
-# 选项卡 1：单日精细调度 (原有逻辑完全保留)
+# --- 选项卡 1：单日精细调度 (用于查看一天的微观动作) ---
 # ==========================================
 with tab1:
     st.subheader("📊 1. 输入今日管网特征与需水量预测")
@@ -142,6 +155,7 @@ with tab1:
 
     user_input_df = st.data_editor(default_demand, use_container_width=True, hide_index=True, key="editor_day")
 
+    # 单日推演按钮
     if st.button("🚀 生成单日最优方案", type="primary", disabled=not model_loaded, key="btn_day"):
         current_level = init_level
         last_action = init_action
@@ -246,7 +260,7 @@ with tab1:
         st.plotly_chart(fig_gantt, use_container_width=True)
 
 # ==========================================
-# 选项卡 2：长周期宏观评估 (🌟 新增黑盒矩阵模式)
+# --- 选项卡 2：长周期宏观评估 (用于 39 天或全年的宏观验证) ---
 # ==========================================
 with tab2:
     st.subheader("📅 多日/全年自动仿真引擎")
@@ -255,29 +269,30 @@ with tab2:
 
     uploaded_long_file = st.file_uploader("📂 上传长周期需水矩阵表 (.xlsx)", type=["xlsx", "csv"], key="upload_long")
 
+    # 外层结构：判断文件是否上传成功
     if uploaded_long_file is not None:
         try:
+            # 1. 文件读取与智能清洗 (去除文字表头)
             if uploaded_long_file.name.endswith('.csv'):
                 df_long = pd.read_csv(uploaded_long_file, header=None)
             else:
                 df_long = pd.read_excel(uploaded_long_file, header=None)
 
-            # 🌟 核心升级：智能剥离非数字表头和时间列 (复刻 MATLAB 的 Range B2)
-            # 1. 强制将所有数据转为数字，遇到 "1:00" 或 "01-01" 这种文本，直接变成空值(NaN)
             df_numeric = df_long.apply(pd.to_numeric, errors='coerce')
-            # 2. 删掉全是空值的行（剔除表头）和全是空值的列（剔除时刻列）
             df_numeric = df_numeric.dropna(axis=0, how='all').dropna(axis=1, how='all')
 
+            # 2. 判断数据是否有效 (行数必须 >= 24)
             if df_numeric.shape[0] >= 24:
-                # 提取底部的 24 行纯数字
                 matrix_24xN = df_numeric.iloc[-24:, :].values
-                # 核心机制：按列(天)拉平拼接为一维长序列
                 demand_sequence = matrix_24xN.flatten('F')
                 total_hours = len(demand_sequence)
                 total_days = total_hours // 24
 
                 st.info(f"✅ 解析成功！检测到有效矩阵特征，共计 **{total_days} 天 ({total_hours} 小时)**，已准备就绪。")
 
+                # ----------------------------------------------------
+                # A. 核心运算区：只有点击按钮那一刻才会执行
+                # ----------------------------------------------------
                 if st.button("🚀 启动长周期全自动推演", type="primary", disabled=not model_loaded, key="btn_long"):
                     current_level = init_level
                     last_action = init_action
@@ -289,12 +304,12 @@ with tab2:
                     start_date = pd.to_datetime("2026-01-01")
                     progress_bar_long = st.progress(0)
 
+                    # 开启物理步进大循环 (比如 8760 个小时)
                     for h_idx in range(total_hours):
                         day_idx = h_idx // 24
                         hour_of_day = (h_idx % 24) + 1
                         current_date = start_date + pd.Timedelta(days=day_idx)
 
-                        # 智能日历：判断夏季套用尖峰电价
                         is_summer = current_date.month in [7, 8]
                         price = summer_prices[hour_of_day - 1] if is_summer else normal_prices[hour_of_day - 1]
                         demand = demand_sequence[h_idx]
@@ -339,7 +354,8 @@ with tab2:
 
                         if h_idx % 100 == 0 or h_idx == total_hours - 1:
                             progress_bar_long.progress((h_idx + 1) / total_hours)
-                    # 🌟 修改点 1：不在这里直接画图了，把算好的数据塞进“网页记忆”里
+
+                    # 运算完毕，把数据封存在“网页记忆”中，防止点击下拉框时数据丢失
                     st.session_state['long_run_done'] = True
                     st.session_state['df_long_results'] = pd.DataFrame(long_results)
                     st.session_state['total_days'] = total_days
@@ -347,10 +363,13 @@ with tab2:
                     st.session_state['total_cost'] = total_cost
                     st.session_state['total_demand'] = sum(demand_sequence)
                     st.session_state['total_hours'] = total_hours
-                # 🌟 修改点 2：【重点！】这里不要缩进了！和 if st.button 平齐
-                # 检查记忆里有没有算好的数据，如果有，就直接渲染，无视按钮的状态
+
+                # ----------------------------------------------------
+                # B. 数据展示区：只要记忆里有数据，就保持渲染显示
+                # （此段代码与上面的 if st.button 完美平齐）
+                # ----------------------------------------------------
                 if st.session_state.get('long_run_done', False):
-                    # 从记忆中提取数据
+                    # 1. 从记忆中唤醒数据
                     df_long_results = st.session_state['df_long_results']
                     total_days = st.session_state['total_days']
                     total_water = st.session_state['total_water']
@@ -358,7 +377,7 @@ with tab2:
                     total_demand = st.session_state['total_demand']
                     total_hours = st.session_state['total_hours']
 
-                    # --- 1. 渲染宏观看板 KPI ---
+                    # 2. 渲染顶部 5 大核心指标 (KPI)
                     st.success("✅ 推演完毕！长周期运行宏观报告如下：")
                     col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("仿真总跨度", f"{total_days} 天")
@@ -367,27 +386,14 @@ with tab2:
                     col4.metric("总电费成本", f"{total_cost / 10000:.2f} 万元")
                     unit_cost = (total_cost / total_water * 1000) if total_water > 0 else 0
                     col5.metric("千吨水调度成本", f"{unit_cost:.2f} 元/千吨")
-                    # 导出报告功能
-                    st.markdown("---")
-                    st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
-                    csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
-                                       file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
-                                       type="primary")
 
-                    # --- 1. 数据预处理：提取月份信息 ---
-                    # 将“日期”列转换为 Pandas 标准时间格式，并提取出“YYYY-MM”格式的月份
+                    # 3. 数据预处理与绘制宏观月度图
                     df_long_results["日期"] = pd.to_datetime(df_long_results["日期"])
                     df_long_results["月份"] = df_long_results["日期"].dt.strftime("%Y-%m")
 
                     st.markdown("#### 📈 长周期宏观趋势分析 (月度聚合)")
-
-                    # --- 2. 绘制第一层：月度宏观图 (12根柱子) ---
-                    # 把每天的数据按“月份”打包求和
-                    df_monthly = df_long_results.groupby("月份").agg({
-                        "需水量(m³)": "sum",
-                        "电费(元)": "sum"
-                    }).reset_index()
+                    df_monthly = df_long_results.groupby("月份").agg(
+                        {"需水量(m³)": "sum", "电费(元)": "sum"}).reset_index()
 
                     fig_month = make_subplots(specs=[[{"secondary_y": True}]])
                     fig_month.add_trace(go.Bar(x=df_monthly["月份"], y=df_monthly["电费(元)"], name="月度总电费",
@@ -395,7 +401,6 @@ with tab2:
                     fig_month.add_trace(go.Scatter(x=df_monthly["月份"], y=df_monthly["需水量(m³)"], name="月度总需水",
                                                    mode="lines+markers", line=dict(color="#3498db", width=3)),
                                         secondary_y=False)
-
                     fig_month.update_layout(height=400, hovermode="x unified",
                                             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right",
                                                         x=1), margin=dict(l=20, r=20, t=40, b=20),
@@ -404,20 +409,16 @@ with tab2:
                     fig_month.update_yaxes(title_text="<b>月度总电费 (元)</b>", secondary_y=True)
                     st.plotly_chart(fig_month, use_container_width=True)
 
-                    # --- 3. 绘制第二层：交互式下拉框与每日细节图 ---
+                    # 4. 交互式下拉框与微观日度细节图 (数据钻取)
                     st.markdown("#### 🔍 月度明细钻取 (日度聚合)")
-
-                    # 抓取表格里出现过的所有月份，放进下拉菜单里
                     available_months = df_monthly["月份"].tolist()
                     selected_month = st.selectbox("请选择要查看具体日期的月份：", options=available_months)
 
                     if selected_month:
-                        # 核心过滤：只把用户选中的那个月的数据挑出来
                         df_selected = df_long_results[df_long_results["月份"] == selected_month]
-                        # 针对这个月，按天打包求和
                         df_daily = df_selected.groupby("日期").agg(
                             {"需水量(m³)": "sum", "电费(元)": "sum"}).reset_index()
-                        df_daily["日期"] = df_daily["日期"].dt.strftime("%Y-%m-%d")  # 转回字符串方便显示
+                        df_daily["日期"] = df_daily["日期"].dt.strftime("%Y-%m-%d")
 
                         fig_day = make_subplots(specs=[[{"secondary_y": True}]])
                         fig_day.add_trace(
@@ -426,21 +427,24 @@ with tab2:
                         fig_day.add_trace(
                             go.Scatter(x=df_daily["日期"], y=df_daily["需水量(m³)"], name=f"{selected_month} 每日需水",
                                        mode="lines+markers", line=dict(color="#2980b9", width=2)), secondary_y=False)
-
                         fig_day.update_layout(height=350, hovermode="x unified", margin=dict(l=20, r=20, t=20, b=20),
                                               plot_bgcolor="rgba(248, 249, 250, 1)")
                         fig_day.update_yaxes(title_text="<b>每日需水量 (m³)</b>", secondary_y=False)
                         fig_day.update_yaxes(title_text="<b>每日电费 (元)</b>", secondary_y=True)
                         st.plotly_chart(fig_day, use_container_width=True)
-            # 导出报告功能
-            st.markdown("---")
-            st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
-            csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
-                               file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
-                               type="primary")
 
+                    # 5. 底部的“一键报表导出”按钮 (永远显示在最后)
+                    st.markdown("---")
+                    st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
+                    csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
+                                       file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
+                                       type="primary")
+
+            # 应对上面 if df_numeric.shape[0] >= 24 的异常处理
             else:
                 st.warning("⚠️ 格式无法识别：请确保 Excel 至少包含 24 行连续的需水量数据。")
+
+        # 应对上面 try 文件读取失败的异常捕获
         except Exception as e:
             st.error(f"❌ 数据解析失败。详情: {e}")
