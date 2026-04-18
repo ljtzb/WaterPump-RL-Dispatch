@@ -318,22 +318,22 @@ if st.button("🚀 一键生成最优调度方案", type="primary", disabled=not
         decision = row["AI 决策"]
 
         if "1号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "1号大泵", "Start": hour_start, "Duration": 1})
+            pump_data.append({"Pump": "1号泵", "Start": hour_start, "Duration": 1})
         if "2号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "2号中泵", "Start": hour_start, "Duration": 1})
+            pump_data.append({"Pump": "2号泵", "Start": hour_start, "Duration": 1})
         if "3号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "3号小泵", "Start": hour_start, "Duration": 1})
+            pump_data.append({"Pump": "3号泵", "Start": hour_start, "Duration": 1})
 
     df_gantt = pd.DataFrame(pump_data)
 
     # 2. 绘制高颜值工业色带
     fig_gantt = go.Figure()
-    colors = {"1号大泵": "rgba(231, 76, 60, 0.9)",  # 警示红：大功率设备
-              "2号中泵": "rgba(243, 156, 18, 0.9)",  # 活力橙：中功率设备
-              "3号小泵": "rgba(46, 204, 113, 0.9)"}  # 环保绿：小功率保压设备
+    colors = {"1号泵": "rgba(231, 76, 60, 0.9)",  # 警示红：大功率设备
+              "2号泵": "rgba(243, 156, 18, 0.9)",  # 活力橙：中功率设备
+              "3号泵": "rgba(46, 204, 113, 0.9)"}  # 环保绿：小功率保压设备
 
     if not df_gantt.empty:
-        for pump in ["3号小泵", "2号中泵", "1号大泵"]:  # 倒序排列，让1号大泵显示在最上方
+        for pump in ["3号泵", "2号泵", "1号泵"]:  # 倒序排列，让1号大泵显示在最上方
             pump_df = df_gantt[df_gantt["Pump"] == pump]
             if not pump_df.empty:
                 fig_gantt.add_trace(go.Bar(
