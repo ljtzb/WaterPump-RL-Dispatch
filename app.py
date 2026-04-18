@@ -306,3 +306,64 @@ if st.button("🚀 一键生成最优调度方案", type="primary", disabled=not
 
     # 将高保真图表渲染到网页
     st.plotly_chart(fig, use_container_width=True)
+
+    # --- 7. 机组启停甘特图 (Gantt Chart) ---
+    st.subheader("⏱️ 水泵机组 24 小时排班甘特图")
+
+    # 1. 自动解析 AI 动作，剥离出每台泵的运行时间段
+    pump_data = []
+    for i, row in results_df.iterrows():
+        hour_end = int(row["时刻"].split(":")[0])
+        hour_start = hour_end - 1
+        decision = row["AI 决策"]
+
+        if "1号" in decision or "三泵全开" in decision:
+            pump_data.append({"Pump": "1号大泵", "Start": hour_start, "Duration": 1})
+        if "2号" in decision or "三泵全开" in decision:
+            pump_data.append({"Pump": "2号中泵", "Start": hour_start, "Duration": 1})
+        if "3号" in decision or "三泵全开" in decision:
+            pump_data.append({"Pump": "3号小泵", "Start": hour_start, "Duration": 1})
+
+    df_gantt = pd.DataFrame(pump_data)
+
+    # 2. 绘制高颜值工业色带
+    fig_gantt = go.Figure()
+    colors = {"1号大泵": "rgba(231, 76, 60, 0.9)",  # 警示红：大功率设备
+              "2号中泵": "rgba(243, 156, 18, 0.9)",  # 活力橙：中功率设备
+              "3号小泵": "rgba(46, 204, 113, 0.9)"}  # 环保绿：小功率保压设备
+
+    if not df_gantt.empty:
+        for pump in ["3号小泵", "2号中泵", "1号大泵"]:  # 倒序排列，让1号大泵显示在最上方
+            pump_df = df_gantt[df_gantt["Pump"] == pump]
+            if not pump_df.empty:
+                fig_gantt.add_trace(go.Bar(
+                    base=pump_df["Start"],
+                    x=pump_df["Duration"],
+                    y=pump_df["Pump"],
+                    orientation='h',
+                    marker_color=colors[pump],
+                    name=pump,
+                    hovertemplate="<b>%{y}</b><br>运行时间段: %{base}:00 至 %{customdata}:00<extra></extra>",
+                    customdata=pump_df["Start"] + 1
+                ))
+
+    # 3. 细节排版优化 (时间轴对齐、网格线淡化)
+    fig_gantt.update_layout(
+        height=300,
+        barmode='overlay',
+        margin=dict(l=20, r=20, t=40, b=20),
+        plot_bgcolor="rgba(248, 249, 250, 1)",
+        xaxis=dict(
+            title="<b>时刻 (0:00 - 24:00)</b>",
+            tickmode='linear',
+            tick0=0,
+            dtick=1,
+            range=[0, 24],
+            gridcolor='rgba(200, 200, 200, 0.2)'
+        ),
+        yaxis=dict(title="", gridcolor='rgba(200, 200, 200, 0.2)'),
+        showlegend=False
+    )
+
+    # 4. 渲染到网页
+    st.plotly_chart(fig_gantt, use_container_width=True)
