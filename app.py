@@ -342,17 +342,78 @@ with tab2:
 
                     # 渲染宏观看板 KPI
                     st.success("✅ 推演完毕！长周期运行宏观报告如下：")
-                    col1, col2, col3, col4 = st.columns(4)
+                    # 🌟 新增：计算总需水量
+                    total_demand = sum(demand_sequence)
+                    # 将原来的 4 列扩充为 5 列
+                    col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("仿真总跨度", f"{total_days} 天")
-                    col2.metric("累计总供水量", f"{total_water / 10000:.2f} 万 m³")
-                    col3.metric("总电费成本", f"{total_cost / 10000:.2f} 万元")
+                    col2.metric("累计总需水量", f"{total_demand / 10000:.2f} 万 m³")
+                    col3.metric("累计总供水量", f"{total_water / 10000:.2f} 万 m³")
+                    col4.metric("总电费成本", f"{total_cost / 10000:.2f} 万元")
                     unit_cost = (total_cost / total_water * 1000) if total_water > 0 else 0
-                    col4.metric("千吨水调度成本", f"{unit_cost:.2f} 元/千吨")
+                    col5.metric("千吨水调度成本", f"{unit_cost:.2f} 元/千吨")
 
                     # 导出报告功能
                     st.markdown("---")
                     st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
                     df_long_results = pd.DataFrame(long_results)
+                    # --- 1. 数据预处理：提取月份信息 ---
+                    # 将“日期”列转换为 Pandas 标准时间格式，并提取出“YYYY-MM”格式的月份
+                    df_long_results["日期"] = pd.to_datetime(df_long_results["日期"])
+                    df_long_results["月份"] = df_long_results["日期"].dt.strftime("%Y-%m")
+
+                    st.markdown("#### 📈 长周期宏观趋势分析 (月度聚合)")
+
+                    # --- 2. 绘制第一层：月度宏观图 (12根柱子) ---
+                    # 把每天的数据按“月份”打包求和
+                    df_monthly = df_long_results.groupby("月份").agg({
+                        "需水量(m³)": "sum",
+                        "电费(元)": "sum"
+                    }).reset_index()
+
+                    fig_month = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig_month.add_trace(go.Bar(x=df_monthly["月份"], y=df_monthly["电费(元)"], name="月度总电费",
+                                               marker_color="rgba(243, 156, 18, 0.7)"), secondary_y=True)
+                    fig_month.add_trace(go.Scatter(x=df_monthly["月份"], y=df_monthly["需水量(m³)"], name="月度总需水",
+                                                   mode="lines+markers", line=dict(color="#3498db", width=3)),
+                                        secondary_y=False)
+
+                    fig_month.update_layout(height=400, hovermode="x unified",
+                                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right",
+                                                        x=1), margin=dict(l=20, r=20, t=40, b=20),
+                                            plot_bgcolor="rgba(248, 249, 250, 1)")
+                    fig_month.update_yaxes(title_text="<b>月度总需水量 (m³)</b>", secondary_y=False)
+                    fig_month.update_yaxes(title_text="<b>月度总电费 (元)</b>", secondary_y=True)
+                    st.plotly_chart(fig_month, use_container_width=True)
+
+                    # --- 3. 绘制第二层：交互式下拉框与每日细节图 ---
+                    st.markdown("#### 🔍 月度明细钻取 (日度聚合)")
+
+                    # 抓取表格里出现过的所有月份，放进下拉菜单里
+                    available_months = df_monthly["月份"].tolist()
+                    selected_month = st.selectbox("请选择要查看具体日期的月份：", options=available_months)
+
+                    if selected_month:
+                        # 核心过滤：只把用户选中的那个月的数据挑出来
+                        df_selected = df_long_results[df_long_results["月份"] == selected_month]
+                        # 针对这个月，按天打包求和
+                        df_daily = df_selected.groupby("日期").agg(
+                            {"需水量(m³)": "sum", "电费(元)": "sum"}).reset_index()
+                        df_daily["日期"] = df_daily["日期"].dt.strftime("%Y-%m-%d")  # 转回字符串方便显示
+
+                        fig_day = make_subplots(specs=[[{"secondary_y": True}]])
+                        fig_day.add_trace(
+                            go.Bar(x=df_daily["日期"], y=df_daily["电费(元)"], name=f"{selected_month} 每日电费",
+                                   marker_color="rgba(46, 204, 113, 0.6)"), secondary_y=True)
+                        fig_day.add_trace(
+                            go.Scatter(x=df_daily["日期"], y=df_daily["需水量(m³)"], name=f"{selected_month} 每日需水",
+                                       mode="lines+markers", line=dict(color="#2980b9", width=2)), secondary_y=False)
+
+                        fig_day.update_layout(height=350, hovermode="x unified", margin=dict(l=20, r=20, t=20, b=20),
+                                              plot_bgcolor="rgba(248, 249, 250, 1)")
+                        fig_day.update_yaxes(title_text="<b>每日需水量 (m³)</b>", secondary_y=False)
+                        fig_day.update_yaxes(title_text="<b>每日电费 (元)</b>", secondary_y=True)
+                        st.plotly_chart(fig_day, use_container_width=True)
                     csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
                                        file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
