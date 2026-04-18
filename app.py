@@ -2,13 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import onnxruntime as ort
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-# 解决图表中文显示问题
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
 
 
 # --- 1. 加载 ONNX 模型 ---
@@ -26,22 +21,18 @@ except Exception as e:
     model_loaded = False
 
 
-# --- 2. 1:1 复刻 MATLAB 的专家导航仪 ---
+# --- 2. 专家导航仪 ---
 def get_expert_suggestion(target_hour, current_water_level, price, demand):
     base_price = 0.65
     valley_ratio = 0.48
-
-    # 策略 A：谷电时间感知蓄水模式
     if price <= base_price * valley_ratio * 1.3:
         hours_left = max(7 - target_hour, 1) if target_hour <= 6 else 1
         dynamic_target = current_water_level + (3.95 - current_water_level) / hours_left
         k_gain = 3000
-    # 策略 B：早高峰平滑释水模式
     elif 7 <= target_hour <= 12:
         progress = (target_hour - 6) / 6
         dynamic_target = 3.9 - (0.9 * progress)
         k_gain = 2000
-    # 策略 C：常规时段稳态过渡模式
     else:
         hours_left = 25 - target_hour
         dynamic_target = min(2.0 + (hours_left * 0.15), 3.9)
@@ -49,14 +40,11 @@ def get_expert_suggestion(target_hour, current_water_level, price, demand):
 
     level_gap = dynamic_target - current_water_level
     ideal_flow = max(demand + (level_gap * k_gain), 0)
-    normalized_flow = ideal_flow / 10000.0
-
-    return ideal_flow, normalized_flow
+    return ideal_flow, ideal_flow / 10000.0
 
 
-# --- 3. 1:1 复刻 MATLAB 的多项式物理引擎 (含 Q-H, Q-P, VFD变频) ---
+# --- 3. 多项式物理引擎 ---
 def calculate_physics(action_real, current_ideal_flow):
-    # 动作解码为状态掩码
     status = [0, 0, 0]
     if action_real == 1:
         status = [1, 0, 0]
@@ -73,38 +61,24 @@ def calculate_physics(action_real, current_ideal_flow):
     elif action_real == 7:
         status = [1, 1, 1]
     else:
-        status = [1, 0, 0]  # 兜底保护
+        status = [1, 0, 0]
 
     design_head = 15.0
-    # 精确对齐你代码里的 Q-H 参数
-    pump_h = [
-        [-1e-6, 0.0008, 27.001],
-        [-8e-7, 0.0002, 28.000],
-        [-8e-7, 0.0005, 27.096]
-    ]
-    # 精确对齐你代码里的 Q-P 参数
-    pump_p = [
-        [1e-6, 0.0142, 127.83],
-        [3e-7, 0.0195, 129.55],
-        [-3e-6, 0.0337, 132.93]
-    ]
+    pump_h = [[-1e-6, 0.0008, 27.001], [-8e-7, 0.0002, 28.000], [-8e-7, 0.0005, 27.096]]
+    pump_p = [[1e-6, 0.0142, 127.83], [3e-7, 0.0195, 129.55], [-3e-6, 0.0337, 132.93]]
 
     cal_rated_q = [0.0, 0.0, 0.0]
     cal_rated_p = [0.0, 0.0, 0.0]
 
-    # 计算额定流量和额定功率
     for i in range(3):
         c_eff = pump_h[i][2] - design_head
         delta = pump_h[i][1] ** 2 - 4 * pump_h[i][0] * c_eff
         if delta >= 0:
-            q_val = (-pump_h[i][1] - np.sqrt(delta)) / (2 * pump_h[i][0])
-            cal_rated_q[i] = max(q_val, 0)
+            cal_rated_q[i] = max((-pump_h[i][1] - np.sqrt(delta)) / (2 * pump_h[i][0]), 0)
         else:
             cal_rated_q[i] = 0
-
         cal_rated_p[i] = pump_p[i][0] * (cal_rated_q[i] ** 2) + pump_p[i][1] * cal_rated_q[i] + pump_p[i][2]
 
-    # 变频控制系统 (VFD) 模拟
     current_max_flow = sum([cal_rated_q[i] * status[i] for i in range(3)])
     real_total_flow = min(current_ideal_flow, current_max_flow)
     real_total_power = 0.0
@@ -113,257 +87,273 @@ def calculate_physics(action_real, current_ideal_flow):
         load_ratio = real_total_flow / current_max_flow
         for i in range(3):
             if status[i] == 1:
-                # 严格使用你的变频耗电公式：0.4 + 0.6 * LoadRatio
-                p_val = cal_rated_p[i] * (0.4 + 0.6 * load_ratio)
-                real_total_power += p_val
+                real_total_power += cal_rated_p[i] * (0.4 + 0.6 * load_ratio)
 
     return real_total_flow, real_total_power, status
 
 
-# --- 4. 网页前端布局 ---
+# --- 电价模板配置 ---
+normal_prices = [0.312] * 6 + [0.65] * 6 + [0.312] * 2 + [0.65] * 2 + [0.9685] * 2 + [1.17] * 2 + [0.9685] * 4
+summer_prices = [0.312] * 6 + [0.65] * 6 + [0.312] * 2 + [0.65] * 2 + [0.9685] * 4 + [1.17] * 2 + [0.9685] * 2
+
+# --- 4. 网页前端总布局 ---
 st.set_page_config(page_title="泵房智能调度系统", layout="wide")
 st.title("💧 给水厂取水泵房智能调度系统")
-st.markdown("基于 Dueling DQN 深度强化学习的 24 小时全自动泵组启停规划")
+st.markdown("基于 Dueling DQN 深度强化学习的自动化泵组启停规划平台")
 
 with st.sidebar:
     st.header("⚙️ 初始环境设置")
-    init_level = st.slider("初始水位 (m)", min_value=1.8, max_value=4.0, value=2.5, step=0.1)
-    init_action = st.selectbox("昨日 24:00 泵组状态", options=[1, 2, 4], format_func=lambda x: {1:"单开1号泵", 2:"单开2号泵", 4:"单开3号泵"}[x])
+    init_level = st.slider("跨日初始水位 (m)", min_value=1.8, max_value=4.0, value=2.5, step=0.1)
+    init_action = st.selectbox("起始泵组状态", options=[1, 2, 4],
+                               format_func=lambda x: {1: "单开1号泵", 2: "单开2号泵", 4: "单开3号泵"}[x])
 
-st.subheader("📊 1. 输入今日 24 小时管网特征参数")
+# 🌟 核心分流设计：选项卡 (Tabs)
+tab1, tab2 = st.tabs(["⏱️ 单日精细调度监控", "📅 长周期宏观评估 (多日/全年)"])
 
-# 默认电价与需水量模板
-normal_prices = [0.312]*6 + [0.65]*6 + [0.312]*2 + [0.65]*2 + [0.9685]*2 + [1.17]*2 + [0.9685]*4
-default_demand = pd.DataFrame({
-    "时间": [f"{i}:00" for i in range(1, 25)],
-    "需水量 (m³)": [1500, 1400, 1300, 1300, 1400, 1800, 2500, 3200, 3000, 2800, 2700, 2600, 2500, 2400, 2400, 2500, 2800, 3100, 3300, 3100, 2600, 2200, 1800, 1600],
-    "实时电价 (元)": normal_prices
-})
+# ==========================================
+# 选项卡 1：单日精细调度 (原有逻辑完全保留)
+# ==========================================
+with tab1:
+    st.subheader("📊 1. 输入今日管网特征与需水量预测")
+    uploaded_file = st.file_uploader("📂 快捷操作：上传单日需水量表格", type=["xlsx", "csv"], key="upload_day")
 
-# 🌟 新增：文件上传功能
-uploaded_file = st.file_uploader("📂 快捷操作：上传外部需水量预测表格 (支持 .xlsx 或 .csv)", type=["xlsx", "csv"])
+    default_demand = pd.DataFrame({
+        "时间": [f"{i}:00" for i in range(1, 25)],
+        "需水量 (m³)": [1500, 1400, 1300, 1300, 1400, 1800, 2500, 3200, 3000, 2800, 2700, 2600, 2500, 2400, 2400, 2500,
+                        2800, 3100, 3300, 3100, 2600, 2200, 1800, 1600],
+        "实时电价 (元)": normal_prices
+    })
 
-if uploaded_file is not None:
-    try:
-        # 判断并读取上传的文件
-        if uploaded_file.name.endswith('.csv'):
-            df_upload = pd.read_csv(uploaded_file)
-        else:
-            df_upload = pd.read_excel(uploaded_file)
-
-        # 智能匹配：寻找叫 "需水量" 或 "需水量 (m³)" 的列
-        if "需水量" in df_upload.columns:
-            default_demand["需水量 (m³)"] = df_upload["需水量"].values[:24]
-        elif "需水量 (m³)" in df_upload.columns:
-            default_demand["需水量 (m³)"] = df_upload["需水量 (m³)"].values[:24]
-        else:
-            # 如果找不到特定的表头，就默认强行抓取第一列的前24个数据
-            default_demand["需水量 (m³)"] = df_upload.iloc[:, 0].values[:24]
-
-        st.success(f"✅ 成功读取文件 `{uploaded_file.name}`！数据已自动填入下方表格，您还可以进行手动微调。")
-    except Exception as e:
-        st.error(f"❌ 读取文件失败，请确保表格包含连续的 24 行数字。错误详情: {e}")
-
-# 显示可编辑表格 (如果用户上传了文件，这里显示的就是上传后的数据)
-user_input_df = st.data_editor(default_demand, use_container_width=True, hide_index=True)
-
-# --- 5. 核心推理推演 ---
-if st.button("🚀 一键生成最优调度方案", type="primary", disabled=not model_loaded):
-    current_level = init_level
-    last_action = init_action
-    pump_run_hours = [0, 0, 0]
-
-    schedule_results = []
-    total_daily_cost = 0.0  # 记录全天总电费
-
-    progress_bar = st.progress(0)
-
-    for hour in range(1, 25):
-        demand = user_input_df.loc[hour - 1, "需水量 (m³)"]
-        price = user_input_df.loc[hour - 1, "实时电价 (元)"]
-
-        # 1. 呼叫专家导航仪
-        ideal_flow, normalized_ideal_flow = get_expert_suggestion(hour, current_level, price, demand)
-
-        # 2. 构造 9 维状态
-        state_vector = np.array([
-            current_level,
-            hour,
-            price,
-            last_action,
-            demand / 1000.0,
-            min(pump_run_hours[0], 15),
-            min(pump_run_hours[1], 15),
-            min(pump_run_hours[2], 15),
-            normalized_ideal_flow
-        ], dtype=np.float32)
-
-        # 3. 大脑思考，输出动作
-        q_values = session.run(None, {input_name: state_vector.reshape(1, -1)})[0]
-        action_real = np.argmax(q_values) + 1
-
-        # 4. 物理引擎接管：计算真实抽水量和功率
-        real_flow, real_power, status = calculate_physics(action_real, ideal_flow)
-
-        # 计算电费成本
-        hourly_cost = real_power * price
-        total_daily_cost += hourly_cost
-
-        # 5. 更新疲劳时间
-        for i in range(3):
-            if status[i] == 1:
-                pump_run_hours[i] += 1
+    if uploaded_file is not None:
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                df_upload = pd.read_csv(uploaded_file)
             else:
-                pump_run_hours[i] = 0
+                df_upload = pd.read_excel(uploaded_file)
+            if "需水量" in df_upload.columns:
+                default_demand["需水量 (m³)"] = df_upload["需水量"].values[:24]
+            elif "需水量 (m³)" in df_upload.columns:
+                default_demand["需水量 (m³)"] = df_upload["需水量 (m³)"].values[:24]
+            else:
+                default_demand["需水量 (m³)"] = df_upload.iloc[:, 0].values[:24]
+            st.success(f"✅ 读取成功！")
+        except Exception as e:
+            st.error(f"❌ 读取失败。详情: {e}")
 
-        # 6. 计算水位变化 (严格使用你的面积参数 2992.5)
-        level_drop = (demand - real_flow) / 2992.5
-        new_level = current_level - level_drop
-        new_level = max(1.8, min(new_level, 4.0))
+    user_input_df = st.data_editor(default_demand, use_container_width=True, hide_index=True, key="editor_day")
 
-        # 7. 记录数据
-        action_dict = {1: "1号泵", 2: "2号泵", 3: "1+2号泵", 4: "3号泵", 5: "1+3号泵", 6: "2+3号泵", 7: "三泵全开"}
-        schedule_results.append({
-            "时刻": f"{hour}:00",
-            "需水量 (m³)": demand,
-            "电价": price,
-            "AI 决策": action_dict.get(action_real, "异常"),
-            "实际抽水 (m³)": round(real_flow, 1),
-            "耗电功率 (kW)": round(real_power, 1),
-            "电费 (元)": round(hourly_cost, 2),
-            "水位 (m)": round(new_level, 3)
-        })
+    if st.button("🚀 生成单日最优方案", type="primary", disabled=not model_loaded, key="btn_day"):
+        current_level = init_level
+        last_action = init_action
+        pump_run_hours = [0, 0, 0]
+        schedule_results = []
+        total_daily_cost = 0.0
+        progress_bar = st.progress(0)
 
-        # 8. 状态跨时段交接
-        current_level = new_level
-        last_action = action_real
-        progress_bar.progress(hour / 24.0)
+        for hour in range(1, 25):
+            demand = user_input_df.loc[hour - 1, "需水量 (m³)"]
+            price = user_input_df.loc[hour - 1, "实时电价 (元)"]
 
-    st.success(f"✅ 调度推演完成！今日预计总电费：**{round(total_daily_cost, 2)} 元**")
+            ideal_flow, normalized_ideal_flow = get_expert_suggestion(hour, current_level, price, demand)
+            state_vector = np.array([current_level, hour, price, last_action, demand / 1000.0,
+                                     min(pump_run_hours[0], 15), min(pump_run_hours[1], 15), min(pump_run_hours[2], 15),
+                                     normalized_ideal_flow], dtype=np.float32)
 
-    results_df = pd.DataFrame(schedule_results)
-    st.dataframe(results_df, use_container_width=True)
+            q_values = session.run(None, {input_name: state_vector.reshape(1, -1)})[0]
+            action_real = np.argmax(q_values) + 1
+            real_flow, real_power, status = calculate_physics(action_real, ideal_flow)
 
-    st.subheader("📈 预测水位与分时电价交互图 (支持鼠标悬停与缩放)")
+            hourly_cost = real_power * price
+            total_daily_cost += hourly_cost
 
-    # 创建双 Y 轴图表
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+            for i in range(3):
+                if status[i] == 1:
+                    pump_run_hours[i] += 1
+                else:
+                    pump_run_hours[i] = 0
 
-    # 🌟 图层 1：电价背景 (阶梯面积图，放右轴)
-    fig.add_trace(
-        go.Scatter(
-            x=results_df["时刻"],
-            y=results_df["电价"],
-            name="分时电价 (元)",
-            mode="lines",
-            line_shape="vh",  # 阶梯状折线
-            fill="tozeroy",  # 填充至 X 轴
-            fillcolor="rgba(46, 204, 113, 0.15)",  # 极淡的绿色背景
-            line=dict(color="rgba(46, 204, 113, 0.6)", width=2),
-            hovertemplate="<b>电价:</b> %{y:.3f} 元<extra></extra>"
-        ),
-        secondary_y=True,
-    )
+            level_drop = (demand - real_flow) / 2992.5
+            new_level = max(1.8, min(current_level - level_drop, 4.0))
 
-    # 🌟 图层 2：水位走势 (带圆点的折线图，放左轴)
-    fig.add_trace(
-        go.Scatter(
-            x=results_df["时刻"],
-            y=results_df["水位 (m)"],
-            name="预测水位 (m)",
-            mode="lines+markers",
-            line=dict(color="#3498db", width=3, shape="spline"),  # 平滑曲线
-            marker=dict(size=8, color="#2980b9", symbol="circle"),
-            # 将 AI 的动作埋入悬停提示中！
-            customdata=results_df["AI 决策"],
-            hovertemplate=(
-                    "<b>时间:</b> %{x}<br>" +
-                    "<b>水位:</b> %{y:.2f} m<br>" +
-                    "<span style='color:#e74c3c'><b>AI 动作: %{customdata}</b></span><extra></extra>"
-            )
-        ),
-        secondary_y=False,
-    )
+            action_dict = {1: "1号泵", 2: "2号泵", 3: "1+2号泵", 4: "3号泵", 5: "1+3号泵", 6: "2+3号泵", 7: "三泵全开"}
+            schedule_results.append({"时刻": f"{hour}:00", "需水量 (m³)": demand, "电价": price,
+                                     "AI 决策": action_dict.get(action_real, "异常"),
+                                     "实际抽水 (m³)": round(real_flow, 1), "耗电功率 (kW)": round(real_power, 1),
+                                     "电费 (元)": round(hourly_cost, 2), "水位 (m)": round(new_level, 3)})
 
-    # 🌟 图层 3：物理红线 (水平警戒线)
-    fig.add_hline(y=1.8, line_dash="dash", line_color="#e74c3c", opacity=0.8, annotation_text="防汽蚀红线 (1.8m)",
-                  annotation_position="bottom right", secondary_y=False)
-    fig.add_hline(y=4.0, line_dash="dash", line_color="#c0392b", opacity=0.8, annotation_text="物理溢流线 (4.0m)",
-                  annotation_position="top right", secondary_y=False)
+            current_level = new_level
+            last_action = action_real
+            progress_bar.progress(hour / 24.0)
 
-    # 全局排版优化
-    fig.update_layout(
-        height=500,
-        margin=dict(l=20, r=20, t=40, b=20),
-        hovermode="x unified",  # 统一悬停框，一目了然
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        plot_bgcolor="rgba(248, 249, 250, 1)",  # 极淡的高级灰底色
-    )
+        st.success(f"✅ 调度推演完成！今日预计总电费：**{round(total_daily_cost, 2)} 元**")
+        results_df = pd.DataFrame(schedule_results)
+        st.dataframe(results_df, use_container_width=True)
 
-    # 设置坐标轴范围和样式
-    fig.update_yaxes(title_text="<b>水池水位 (m)</b>", color="#2980b9", range=[1.5, 4.2], secondary_y=False)
-    fig.update_yaxes(title_text="<b>实时电价 (元)</b>", color="#27ae60", range=[0, 1.5], secondary_y=True)
+        st.subheader("📈 预测水位与分时电价交互图")
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Scatter(x=results_df["时刻"], y=results_df["电价"], name="分时电价", mode="lines", line_shape="vh",
+                       fill="tozeroy", fillcolor="rgba(46, 204, 113, 0.15)",
+                       line=dict(color="rgba(46, 204, 113, 0.6)", width=2),
+                       hovertemplate="<b>电价:</b> %{y:.3f} 元<extra></extra>"), secondary_y=True)
+        fig.add_trace(go.Scatter(x=results_df["时刻"], y=results_df["水位 (m)"], name="预测水位", mode="lines+markers",
+                                 line=dict(color="#3498db", width=3, shape="spline"),
+                                 marker=dict(size=8, color="#2980b9", symbol="circle"),
+                                 customdata=results_df["AI 决策"],
+                                 hovertemplate="<b>时间:</b> %{x}<br><b>水位:</b> %{y:.2f} m<br><span style='color:#e74c3c'><b>AI 动作: %{customdata}</b></span><extra></extra>"),
+                      secondary_y=False)
+        fig.add_hline(y=1.8, line_dash="dash", line_color="#e74c3c", opacity=0.8, annotation_text="防汽蚀红线",
+                      secondary_y=False)
+        fig.add_hline(y=4.0, line_dash="dash", line_color="#c0392b", opacity=0.8, annotation_text="物理溢流线",
+                      secondary_y=False)
+        fig.update_layout(height=400, hovermode="x unified",
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        fig.update_yaxes(title_text="水池水位 (m)", color="#2980b9", range=[1.5, 4.2], secondary_y=False)
+        fig.update_yaxes(title_text="实时电价 (元)", color="#27ae60", range=[0, 1.5], secondary_y=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-    # 将高保真图表渲染到网页
-    st.plotly_chart(fig, use_container_width=True)
+        st.subheader("⏱️ 水泵机组 24 小时排班甘特图")
+        pump_data = []
+        for i, row in results_df.iterrows():
+            hour_end = int(row["时刻"].split(":")[0])
+            hour_start = hour_end - 1
+            decision = row["AI 决策"]
+            if "1号" in decision or "三泵全开" in decision: pump_data.append(
+                {"Pump": "1号泵", "Start": hour_start, "Duration": 1})
+            if "2号" in decision or "三泵全开" in decision: pump_data.append(
+                {"Pump": "2号泵", "Start": hour_start, "Duration": 1})
+            if "3号" in decision or "三泵全开" in decision: pump_data.append(
+                {"Pump": "3号泵", "Start": hour_start, "Duration": 1})
 
-    # --- 7. 机组启停甘特图 (Gantt Chart) ---
-    st.subheader("⏱️ 水泵机组 24 小时排班甘特图")
+        df_gantt = pd.DataFrame(pump_data)
+        fig_gantt = go.Figure()
+        colors = {"1号泵": "rgba(231, 76, 60, 0.9)", "2号泵": "rgba(243, 156, 18, 0.9)",
+                  "3号泵": "rgba(46, 204, 113, 0.9)"}
+        if not df_gantt.empty:
+            for pump in ["3号泵", "2号泵", "1号泵"]:
+                pump_df = df_gantt[df_gantt["Pump"] == pump]
+                if not pump_df.empty:
+                    fig_gantt.add_trace(
+                        go.Bar(base=pump_df["Start"], x=pump_df["Duration"], y=pump_df["Pump"], orientation='h',
+                               marker_color=colors[pump], name=pump,
+                               hovertemplate="<b>%{y}</b><br>运行时间段: %{base}:00 至 %{customdata}:00<extra></extra>",
+                               customdata=pump_df["Start"] + 1))
+        fig_gantt.update_layout(height=300, barmode='overlay', margin=dict(l=20, r=20, t=40, b=20),
+                                plot_bgcolor="rgba(248, 249, 250, 1)",
+                                xaxis=dict(title="<b>时刻 (0:00 - 24:00)</b>", tickmode='linear', tick0=0, dtick=1,
+                                           range=[0, 24], gridcolor='rgba(200, 200, 200, 0.2)'),
+                                yaxis=dict(title="", gridcolor='rgba(200, 200, 200, 0.2)'), showlegend=False)
+        st.plotly_chart(fig_gantt, use_container_width=True)
 
-    # 1. 自动解析 AI 动作，剥离出每台泵的运行时间段
-    pump_data = []
-    for i, row in results_df.iterrows():
-        hour_end = int(row["时刻"].split(":")[0])
-        hour_start = hour_end - 1
-        decision = row["AI 决策"]
+# ==========================================
+# 选项卡 2：长周期宏观评估 (🌟 新增黑盒矩阵模式)
+# ==========================================
+with tab2:
+    st.subheader("📅 多日/全年自动仿真引擎")
+    st.markdown(
+        "上传连续多日的 **需水量数据矩阵 (24行 × N列)**，系统将自动拼接长周期序列，并动态套用时令电价进行全闭环无缝推演。")
 
-        if "1号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "1号泵", "Start": hour_start, "Duration": 1})
-        if "2号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "2号泵", "Start": hour_start, "Duration": 1})
-        if "3号" in decision or "三泵全开" in decision:
-            pump_data.append({"Pump": "3号泵", "Start": hour_start, "Duration": 1})
+    uploaded_long_file = st.file_uploader("📂 上传长周期需水矩阵表 (.xlsx)", type=["xlsx", "csv"], key="upload_long")
 
-    df_gantt = pd.DataFrame(pump_data)
+    if uploaded_long_file is not None:
+        try:
+            if uploaded_long_file.name.endswith('.csv'):
+                df_long = pd.read_csv(uploaded_long_file, header=None)
+            else:
+                df_long = pd.read_excel(uploaded_long_file, header=None)
 
-    # 2. 绘制高颜值工业色带
-    fig_gantt = go.Figure()
-    colors = {"1号泵": "rgba(231, 76, 60, 0.9)",  # 警示红：大功率设备
-              "2号泵": "rgba(243, 156, 18, 0.9)",  # 活力橙：中功率设备
-              "3号泵": "rgba(46, 204, 113, 0.9)"}  # 环保绿：小功率保压设备
+            num_data = df_long.select_dtypes(include=[np.number]).dropna(how='all')
+            if num_data.shape[0] >= 24:
+                # 提取底部的 24 行，剥离表头
+                matrix_24xN = num_data.iloc[-24:, :].values
+                # 核心机制：按列(天)拉平拼接为一维长序列
+                demand_sequence = matrix_24xN.flatten('F')
+                total_hours = len(demand_sequence)
+                total_days = total_hours // 24
 
-    if not df_gantt.empty:
-        for pump in ["3号泵", "2号泵", "1号泵"]:  # 倒序排列，让1号大泵显示在最上方
-            pump_df = df_gantt[df_gantt["Pump"] == pump]
-            if not pump_df.empty:
-                fig_gantt.add_trace(go.Bar(
-                    base=pump_df["Start"],
-                    x=pump_df["Duration"],
-                    y=pump_df["Pump"],
-                    orientation='h',
-                    marker_color=colors[pump],
-                    name=pump,
-                    hovertemplate="<b>%{y}</b><br>运行时间段: %{base}:00 至 %{customdata}:00<extra></extra>",
-                    customdata=pump_df["Start"] + 1
-                ))
+                st.info(f"✅ 解析成功！检测到有效矩阵特征，共计 **{total_days} 天 ({total_hours} 小时)**，已准备就绪。")
 
-    # 3. 细节排版优化 (时间轴对齐、网格线淡化)
-    fig_gantt.update_layout(
-        height=300,
-        barmode='overlay',
-        margin=dict(l=20, r=20, t=40, b=20),
-        plot_bgcolor="rgba(248, 249, 250, 1)",
-        xaxis=dict(
-            title="<b>时刻 (0:00 - 24:00)</b>",
-            tickmode='linear',
-            tick0=0,
-            dtick=1,
-            range=[0, 24],
-            gridcolor='rgba(200, 200, 200, 0.2)'
-        ),
-        yaxis=dict(title="", gridcolor='rgba(200, 200, 200, 0.2)'),
-        showlegend=False
-    )
+                if st.button("🚀 启动长周期全自动推演", type="primary", disabled=not model_loaded, key="btn_long"):
+                    current_level = init_level
+                    last_action = init_action
+                    pump_run_hours = [0, 0, 0]
+                    total_cost = 0.0
+                    total_water = 0.0
+                    long_results = []
 
-    # 4. 渲染到网页
-    st.plotly_chart(fig_gantt, use_container_width=True)
+                    start_date = pd.to_datetime("2026-01-01")
+                    progress_bar_long = st.progress(0)
+
+                    for h_idx in range(total_hours):
+                        day_idx = h_idx // 24
+                        hour_of_day = (h_idx % 24) + 1
+                        current_date = start_date + pd.Timedelta(days=day_idx)
+
+                        # 智能日历：判断夏季套用尖峰电价
+                        is_summer = current_date.month in [7, 8]
+                        price = summer_prices[hour_of_day - 1] if is_summer else normal_prices[hour_of_day - 1]
+                        demand = demand_sequence[h_idx]
+
+                        ideal_flow, normalized_ideal_flow = get_expert_suggestion(hour_of_day, current_level, price,
+                                                                                  demand)
+                        state_vector = np.array([current_level, hour_of_day, price, last_action, demand / 1000.0,
+                                                 min(pump_run_hours[0], 15), min(pump_run_hours[1], 15),
+                                                 min(pump_run_hours[2], 15), normalized_ideal_flow], dtype=np.float32)
+
+                        q_values = session.run(None, {input_name: state_vector.reshape(1, -1)})[0]
+                        action_real = np.argmax(q_values) + 1
+
+                        real_flow, real_power, status = calculate_physics(action_real, ideal_flow)
+                        hourly_cost = real_power * price
+                        total_cost += hourly_cost
+                        total_water += real_flow
+
+                        for i in range(3):
+                            if status[i] == 1:
+                                pump_run_hours[i] += 1
+                            else:
+                                pump_run_hours[i] = 0
+
+                        level_drop = (demand - real_flow) / 2992.5
+                        current_level = max(1.8, min(current_level - level_drop, 4.0))
+                        last_action = action_real
+
+                        action_dict = {1: "1号泵", 2: "2号泵", 3: "1+2号泵", 4: "3号泵", 5: "1+3号泵", 6: "2+3号泵",
+                                       7: "三泵全开"}
+                        long_results.append({
+                            "日期": current_date.strftime("%Y-%m-%d"),
+                            "时刻": f"{hour_of_day}:00",
+                            "需水量(m³)": round(demand, 1),
+                            "实际抽水(m³)": round(real_flow, 1),
+                            "水泵状态": action_dict.get(action_real, "异常"),
+                            "总功率(kW)": round(real_power, 1),
+                            "电价(元)": price,
+                            "电费(元)": round(hourly_cost, 2),
+                            "水位(m)": round(current_level, 3)
+                        })
+
+                        if h_idx % 100 == 0 or h_idx == total_hours - 1:
+                            progress_bar_long.progress((h_idx + 1) / total_hours)
+
+                    # 渲染宏观看板 KPI
+                    st.success("✅ 推演完毕！长周期运行宏观报告如下：")
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("仿真总跨度", f"{total_days} 天")
+                    col2.metric("累计总供水量", f"{total_water / 10000:.2f} 万 m³")
+                    col3.metric("总电费成本", f"{total_cost / 10000:.2f} 万元")
+                    unit_cost = (total_cost / total_water * 1000) if total_water > 0 else 0
+                    col4.metric("千吨水调度成本", f"{unit_cost:.2f} 元/千吨")
+
+                    # 导出报告功能
+                    st.markdown("---")
+                    st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
+                    df_long_results = pd.DataFrame(long_results)
+                    csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
+                                       file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
+                                       type="primary")
+
+            else:
+                st.warning("⚠️ 格式无法识别：请确保 Excel 至少包含 24 行连续的需水量数据。")
+        except Exception as e:
+            st.error(f"❌ 数据解析失败。详情: {e}")
