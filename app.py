@@ -339,12 +339,27 @@ with tab2:
 
                         if h_idx % 100 == 0 or h_idx == total_hours - 1:
                             progress_bar_long.progress((h_idx + 1) / total_hours)
+                    # 🌟 修改点 1：不在这里直接画图了，把算好的数据塞进“网页记忆”里
+                    st.session_state['long_run_done'] = True
+                    st.session_state['df_long_results'] = pd.DataFrame(long_results)
+                    st.session_state['total_days'] = total_days
+                    st.session_state['total_water'] = total_water
+                    st.session_state['total_cost'] = total_cost
+                    st.session_state['total_demand'] = sum(demand_sequence)
+                    st.session_state['total_hours'] = total_hours
+                # 🌟 修改点 2：【重点！】这里不要缩进了！和 if st.button 平齐
+                # 检查记忆里有没有算好的数据，如果有，就直接渲染，无视按钮的状态
+                if st.session_state.get('long_run_done', False):
+                    # 从记忆中提取数据
+                    df_long_results = st.session_state['df_long_results']
+                    total_days = st.session_state['total_days']
+                    total_water = st.session_state['total_water']
+                    total_cost = st.session_state['total_cost']
+                    total_demand = st.session_state['total_demand']
+                    total_hours = st.session_state['total_hours']
 
-                    # 渲染宏观看板 KPI
+                    # --- 1. 渲染宏观看板 KPI ---
                     st.success("✅ 推演完毕！长周期运行宏观报告如下：")
-                    # 🌟 新增：计算总需水量
-                    total_demand = sum(demand_sequence)
-                    # 将原来的 4 列扩充为 5 列
                     col1, col2, col3, col4, col5 = st.columns(5)
                     col1.metric("仿真总跨度", f"{total_days} 天")
                     col2.metric("累计总需水量", f"{total_demand / 10000:.2f} 万 m³")
@@ -352,11 +367,14 @@ with tab2:
                     col4.metric("总电费成本", f"{total_cost / 10000:.2f} 万元")
                     unit_cost = (total_cost / total_water * 1000) if total_water > 0 else 0
                     col5.metric("千吨水调度成本", f"{unit_cost:.2f} 元/千吨")
-
                     # 导出报告功能
                     st.markdown("---")
                     st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
-                    df_long_results = pd.DataFrame(long_results)
+                    csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
+                                       file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
+                                       type="primary")
+
                     # --- 1. 数据预处理：提取月份信息 ---
                     # 将“日期”列转换为 Pandas 标准时间格式，并提取出“YYYY-MM”格式的月份
                     df_long_results["日期"] = pd.to_datetime(df_long_results["日期"])
@@ -414,10 +432,13 @@ with tab2:
                         fig_day.update_yaxes(title_text="<b>每日需水量 (m³)</b>", secondary_y=False)
                         fig_day.update_yaxes(title_text="<b>每日电费 (元)</b>", secondary_y=True)
                         st.plotly_chart(fig_day, use_container_width=True)
-                    csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
-                                       file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
-                                       type="primary")
+            # 导出报告功能
+            st.markdown("---")
+            st.write(f"💡 系统已自动将所有物理引擎产生的 {total_hours} 条精细状态数据装订成册。")
+            csv_data = df_long_results.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(label="📥 一键下载完整详细调度报表 (.csv)", data=csv_data,
+                               file_name=f"综合调度推演报告_{total_days}天.csv", mime="text/csv",
+                               type="primary")
 
             else:
                 st.warning("⚠️ 格式无法识别：请确保 Excel 至少包含 24 行连续的需水量数据。")
